@@ -37,7 +37,6 @@ end
 -- local clamp = math.clamp or function(n,min,max) return math.min(math.max(n,min),max) end
 local dump = false
 --- opcode type lookup.
----@internal
 ---@enum (key) RV_OPT
 local op_t = {
    [0] = "I", -- LOAD
@@ -84,7 +83,6 @@ local op_t = {
 -- you are assumed to be indexing
 -- this table with knowledge of
 -- the instruction's type
----@internal
 ---@enum (key) RV_OPN
 local op_n = {
    [0] = { [-1] = "LOAD", [0] = "lb", "lh", "lw", nil, "lbu", "lhu" },
@@ -604,7 +602,6 @@ function state_utils:virt2real(addr)
    error("TODO")
 end
 ---@diagnostic disable-next-line: unused
----@hidden
 function state_utils:access_check(from, to, perm)
    -- TODO: access checking
    perm = perm or self.permission

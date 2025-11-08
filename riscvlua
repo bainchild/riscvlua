@@ -1,0 +1,342 @@
+#!/usr/bin/env lua
+-- Used for riscv-arch-tests as well as general running activities.
+local args
+do
+   local parser = require("argparse")("riscvlua", "RISC-V ISA Simulator in pure lua")
+   parser:argument("input", "input file, in elf format")
+   parser:option("--signature", "Test signature file, for riscof.")
+   parser:option("--isa", "ISA to use", "riscv32ius_Zicsr_Zifencei")
+   parser:option("-g --gdb", "Listen for gdb on port", nil, tonumber):args("?")
+   parser:option("-h --harts", "Number of harts", 1)
+   parser:option("--log", "log file to output to")
+   parser:flag("--riscvtests", "Enable ecall exiting for riscv-tests.")
+   parser:flag("-q --quiet")
+   args = parser:parse()
+end
+local rv = require("riscvlua")
+if args.log then
+   rv.set_verbose(true)
+   io.output(assert(io.open(args.log, "wb")))
+   function print(...)
+      local s = {}
+      for _, v in next, { ... } do
+         table.insert(s, tostring(v))
+      end
+      return io.write(table.concat(s, " ") .. "\n")
+   end
+   rv.set_print(print)
+else
+   rv.set_verbose(not args.quiet)
+end
+rv.set_riscv_tests(args.riscvtests)
+local bit32 = rv.io.bit
+local elf_file = assert(io.open(args.input, "rb"), "failed to open file")
+local core, elf = rv.create_core(args.harts, elf_file)
+local sig_begin, sig_size, fromhost, tohost
+if args.signature then
+   local sig_end
+   -- local shlookup = {
+   --    [0]="NULL";
+   --    [1]="PROGBITS";
+   --    [2]="SYMTAB";
+   --    [3]="STRTAB";
+   --    [4]="RELA";
+   --    [5]="HASH";
+   --    [6]="DYNAMIC";
+   --    [7]="NOTE";
+   --    [8]="NOBITS";
+   --    [9]="REL";
+   --    [10]="SHLIB";
+   --    [11]="DYNSYM";
+   --    [0x0E]="INIT_ARRAY";
+   --    [0x0F]="FINI_ARRAY";
+   --    [0x10]="PREINIT_ARRAY";
+   --    [0x11]="GROUP";
+   --    [0x12]="SYMTAB_SHNDX";
+   --    [0x13]="NUM";
+   -- }
+   -- local proglookup = {
+   --    [0]="NULL";
+   --    [1]="LOAD";
+   --    [2]="DYNAMIC";
+   --    [3]="INTERP";
+   --    [4]="NOTE";
+   --    [5]="SHLIB";
+   --    [6]="PHDR";
+   --    [7]="TLS";
+   -- }
+   -- local function rpad(a,b,c)
+   --    return a..(c or " "):rep(b-#a)
+   -- end
+   local function safe(str)
+      return (str:gsub("[^\32-\126]", function(b)
+         return "\\" .. string.byte(b)
+      end))
+   end
+   local function combine_numbers(...)
+      local n = 0
+      for i, v in next, { ... } do
+         n = bit32.bor(n, bit32.lshift(v, (i - 1) * 8))
+      end
+      return n
+   end
+   local function read_byte(s, n)
+      if n == nil or n == 1 then
+         local char = s:read(1)
+         if char then
+            return char:byte()
+         end
+         return nil
+      end
+      local str, res = s:read(n) or "", {}
+      for i = 1, n do
+         table.insert(res, str:byte(i) or 0)
+      end
+      return (table.unpack or unpack)(res)
+   end
+   local function cread_byte(...)
+      return combine_numbers(read_byte(...))
+   end
+   local function read_string(s)
+      local str = ""
+      local char
+      repeat
+         char = s:read(1)
+         str = str .. char
+      until char == "\0"
+      return safe(str:sub(1, -2))
+      -- local len = s:read(1):byte()
+      -- return safe(s:read(len))
+   end
+   local sst_off, strtab_off
+   do
+      local shne = elf.Header.SectionHeaderNameEntry + 1
+      -- print("Section header name entry: "..shne)
+      -- if elf.SectionEntries[shne] then
+      --    local snh = elf.SectionEntries[shne]
+      --    sst_off=snh.Offset
+      -- end
+      for i, v in next, elf.SectionEntries do
+         if v.Type == 3 and i ~= shne then
+            strtab_off = v.Offset
+         end
+      end
+   end
+   -- print("Entrypoint:",elf.Header.Entry)
+   -- print("Sections:")
+   -- local paddr = 0
+   for _, v in next, elf.SectionEntries do
+      -- local lname
+      -- if sst_off and v.NameOffset then
+      --    elf_file:seek('set',sst_off+v.NameOffset)
+      --    lname=read_string(elf_file)
+      --    if #lname==0 then lname=nil end
+      -- end
+      if v.Type == 2 then
+         -- symtab
+         -- print("the ending is at",elf_file:seek("end"))
+         elf_file:seek("set", v.Offset + (v.EntrySize or 16)) -- 16 to skip the first entry which is 0
+         local ending = v.Offset + v.Size
+         local sym = 0
+         while true do
+            sym = sym + 1
+            if elf_file:seek("cur") > ending then
+               break
+            end
+            local name, value, size = cread_byte(elf_file, 4), cread_byte(elf_file, 4), cread_byte(elf_file, 4)
+            local info, other = read_byte(elf_file, 2)
+            local shndx = cread_byte(elf_file, 2)
+            if name == 0 then
+               name = "unnamed"
+            else
+               local cur = elf_file:seek("cur")
+               elf_file:seek("set", strtab_off + name)
+               name = read_string(elf_file)
+               elf_file:seek("set", cur)
+            end
+            -- print(sym,string.format("0x%x",v.Offset),name,string.format("0x%x",value),size,info,other,shndx)
+            if name == "begin_signature" then
+               sig_begin = value
+            elseif name == "end_signature" then
+               sig_end = value
+            elseif name == "tohost" then
+               tohost = value
+            elseif name == "fromhost" then
+               fromhost = value
+            end
+            if sig_begin and sig_end and tohost and fromhost then
+               break
+            end
+         end
+         if sig_begin and sig_end and tohost and fromhost then
+            break
+         end
+      end
+      if sig_begin and sig_end and tohost and fromhost then
+         break
+      end
+      -- local name = shlookup[v.Type] or ("["..tostring(v.Type).."]")
+      -- if v.Size then
+      --    print(string.format("   %s%s:\n      0x%x - 0x%x\t->\t0x%x - 0x%x",rpad("("..name..")",15," "),lname or "",v.Offset,v.Offset+v.Size,(v.Address or paddr),(v.Address or v.PhysicalAddress or paddr)+v.Size))
+      --    paddr=(v.Address or paddr)+v.Size
+      -- else
+      --    print(string.format("   %s%s:\n      0x%x\t->\t0x%x",rpad("("..name..")",15," "),lname or "",v.Offset,(v.Address or paddr)))
+      --    paddr=(v.Address or paddr)+1
+      -- end
+   end
+   assert(sig_begin ~= nil and sig_end ~= nil and tohost ~= nil and fromhost ~= nil, "Failed to find signature symbol addresses in the ELF.")
+   sig_size = sig_end - sig_begin
+   print(string.format("sig: 0x%08x + 0x%04x fromhost: 0x%08x tohost: 0x%08x", sig_begin, sig_size, fromhost, tohost))
+end
+if args.gdb then
+   local function split(a, b, c)
+      local m = {}
+      for v in (a .. (c or b)):gmatch("(.-)" .. b) do
+         table.insert(m, v)
+      end
+      return m
+   end
+   local function find(a, b)
+      for i, v in next, a do
+         if v == b then
+            return i
+         end
+      end
+      return nil
+   end
+   local function checksum(data)
+      local checksum = 0
+      for i = 1, #data do
+         checksum = checksum + data:byte(i)
+      end
+      return checksum % 256
+   end
+   local function decode_packet(packet)
+      local data, check = packet:match("%$(.-)#(%x%x)")
+      if data == nil then
+         return data, "malformed packet: " .. packet
+      end
+      if not data:find(";") then
+         data = data .. ":"
+      end
+      local packid, data2 = data:match("(.+):(.*)")
+      if packid then
+         data = data2
+      end
+      check = tonumber(check, 16)
+      if check == nil then
+         return check, "bad checksum"
+      end
+      local newcheck = checksum((packid or "") .. data)
+      if newcheck ~= check then
+         print("checksum fail", newcheck, check)
+         -- print(data)
+      end
+      -- assert(newcheck==check,"bad checksum")
+      local n = split(data, ";")
+      if packid then
+         n[0] = packid
+      end
+      return n
+   end
+   local function encode_packet(packet)
+      local middle = table.concat(packet, ";")
+      return string.format("$%s%s#%02x", packet[0] and packet[0] .. ":" or "", middle, checksum(middle))
+   end
+   local remote_supported = {}
+   local function process_packet(con, packet)
+      local pack, err = decode_packet(packet)
+      if pack then
+         print(pack[0], table.concat(pack, ", "))
+         -- con:send("+$#00")
+         local packetid = pack[0]
+         pack[0] = nil
+         packetid = packetid or ""
+         local is_halter = packetid:sub(1, 1) == "v" and packetid:sub(-1) == "?"
+         if is_halter then
+            packetid = packetid:sub(1, -2)
+         end
+         if packetid == "qSupported" then
+            remote_supported = pack
+            local newpack = {
+               [0] = packetid,
+            }
+            for i = 1, #pack do
+               local v = pack[i]
+               if v == "swbreak" or v == "hwbreak" then
+                  newpack[i] = v .. "+"
+               else
+                  newpack[i] = v .. "-"
+               end
+            end
+            return encode_packet(newpack)
+         elseif packetid == "QStartNoAckMode" then
+            return encode_packet({ "OK" })
+         elseif is_halter then
+            return encode_packet({ "T 00 hwbreak:00" })
+         elseif packetid == "qTStatus" then
+            return encode_packet({ "tnotrun:0" })
+         elseif packetid == "vCont?" then
+            return encode_packet({ "vCont", "c", "s", "t", "r" })
+         elseif packetid:sub(1, 1) == "v" then
+            return "$#00"
+         end
+      else
+         print(err)
+      end
+   end
+   local sock = assert(require("socket").bind("127.0.0.1", args.gdb[1] or 0))
+   print(string.format("GDB stub started on %s:%d", sock:getsockname()))
+   while true do
+      local con = sock:accept()
+      local packet, ttl = "", math.huge
+      con:setoption("keepalive", true)
+      while true do
+         local s, err = con:receive(1)
+         if s == "+" then
+         elseif s == "-" then
+            if lastpack then
+               con:send(lastpack)
+            end
+         else
+            if s then
+               packet = packet .. s
+               if ttl == 0 then
+                  con:send("+")
+                  lastpack = process_packet(con, packet)
+                  con:send(lastpack)
+                  packet = ""
+                  ttl = math.huge
+               else
+                  ttl = ttl - 1
+               end
+               if s == "#" then
+                  ttl = 1
+               end
+            elseif err == "closed" then
+               break
+            end
+         end
+      end
+      con:shutdown()
+   end
+else
+   while not rv.run_core(core) do
+      if args.signature then
+         local val = rv.io.readu32()(core.memory, tohost)
+         -- print(string.format("READ TOHOST: %08x: %08x",tohost,val))
+         if val == 1 then
+            break
+            -- elseif (args.log or not args.quiet) and bit32.extract(val,23,8)~=0 then
+            --    io.write((string.char(bit32.extract(val,0,8),bit32.extract(val,7,8),bit32.extract(15,8)):gsub("\0*","")))
+         end
+      end
+   end
+end
+if args.signature then
+   local file = assert(io.open(args.signature, "wb"), "Failed to open signature file for writing.")
+   for i = 0, sig_size - 1, 4 do
+      file:write(string.format("%08x\n", rv.io.readu32()(core.memory, sig_begin + i)):sub(-9))
+   end
+   file:close()
+end

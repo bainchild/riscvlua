@@ -30,8 +30,161 @@ else
 end
 rv.set_riscv_tests(args.riscvtests)
 local bit32 = rv.io.bit
+local extract = rv.io.extract
+local memory = {}
+local fallback_memory = {}
+local base_addr = bit32.bor(0x80000000, 0)
+local buflen = 1 * 1000 * 1000 -- 1 gb
+if buffer then -- luau buffer
+   local function relocate(f, fallback)
+      return function(m, addr, data)
+         addr = bit32.band(addr, 0xffffffff)
+         if addr >= base_addr and addr <= base_addr + buflen then
+            return f(m, addr - base_addr, data)
+         else
+            return fallback(fallback_memory, addr, data)
+         end
+      end
+   end
+   memory = buffer.create(buflen)
+   rv.set_memory_functions({
+      relocate(buffer.readu8, rv.io.readu8()),
+      relocate(buffer.readu16, rv.io.readu16()),
+      relocate(buffer.readu32, rv.io.readu32()),
+   }, {
+      relocate(buffer.writeu8, rv.io.writeu8()),
+      relocate(buffer.writeu16, rv.io.writeu16()),
+      relocate(buffer.writeu32, rv.io.writeu32()),
+   })
+elseif jit and false then -- TODO: luajit-specific memory implementation
+   local function writeqword2(memory, addr, a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p)
+      memory[addr], memory[addr + 1], memory[addr + 2], memory[addr + 3], memory[addr + 4], memory[addr + 5], memory[addr + 6], memory[addr + 7], memory[addr + 8], memory[addr + 9], memory[addr + 10], memory[addr + 11], memory[addr + 12], memory[addr + 13], memory[addr + 14], memory[addr + 15] =
+         a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p
+   end
+   local mask_sign_bit = bit.bnot(bit.lshift(1, 31))
+   local function jit_le(a, b)
+      local s1, s2 = extract(a, 31, 1) == 1, extract(b, 31, 1) == 1
+      a, b = bit32.band(a, mask_sign_bit), bit32.band(b, mask_sign_bit)
+      local lt = (s2 and not s1)
+      if not lt and s1 == s2 then
+         lt = a <= b
+      end
+      return lt
+   end
+   local function jit_ge(a, b)
+      local s1, s2 = extract(a, 31, 1) == 1, extract(b, 31, 1) == 1
+      a, b = bit32.band(a, mask_sign_bit), bit32.band(b, mask_sign_bit)
+      local gt = (s1 and not s2)
+      if not gt and s1 == s2 then
+         gt = a >= b
+      end
+      return gt
+   end
+   local ffi = require("ffi")
+   memory = ffi.new("uint8_t[?]", buflen)
+   base_addr = tonumber(ffi.cast("uint32_t", bit32.band(base_addr, 0xffffffff)))
+   buflen = tonumber(ffi.cast("uint32_t", bit32.band(buflen, 0xffffffff)))
+   -- bounds checks are failing for tohost (0x8040000 > 0x80000000+buflen) and the fallback memory implementation
+   -- for some reason isn't working in this field.
+   local function relocate(f, fallback)
+      return function(m, addr, data)
+         addr = tonumber(ffi.cast("uint32_t", bit32.band(addr, 0xffffffff)))
+         if jit_ge(addr,base_addr) and jit_le(addr,base_addr + buflen) then
+            return f(m, addr - base_addr, data)
+         else
+            return fallback(fallback_memory, addr, data)
+         end
+      end
+   end
+   ffi.fill(memory, buflen)
+   local function readu8(memory, addr)
+      addr = tonumber(ffi.cast("uint32_t", bit32.band(addr, 0xffffffff)))
+      assert(addr >= 0 and addr <= buflen, "Address out of bounds. (not " .. string.format("%08x <= %08x <= %08x", 0, addr, buflen) .. ")")
+      return memory[addr]
+   end
+   local function writeu8(memory, addr, data)
+      addr = tonumber(ffi.cast("uint32_t", bit32.band(addr, 0xffffffff)))
+      assert(addr >= 0 and addr <= buflen, "Address out of bounds. (not " .. string.format("%08x <= %08x <= %08x", 0, addr, buflen) .. ")")
+      memory[addr] = ffi.cast("uint8_t", data)
+   end
+   local function readu16(memory, addr, big)
+      addr = tonumber(ffi.cast("uint32_t", bit32.band(addr, 0xffffffff)))
+      assert(addr >= 0 and addr <= buflen - 2, "Address out of bounds. (not " .. string.format("%08x <= %08x <= %08x", 0, addr, buflen - 2) .. ")")
+      local a, b = memory[addr], memory[addr + 1]
+      if big then
+         a, b = b, a
+      end
+      return bit32.bor(bit32.lshift(b or 0, 8), a or 0)
+   end
+   local function writeu16(memory, addr, data, big)
+      addr = tonumber(ffi.cast("uint32_t", bit32.band(addr, 0xffffffff)))
+      assert(addr >= 0 and addr <= buflen - 2, "Address out of bounds. (not " .. string.format("%08x <= %08x <= %08x", 0, addr, buflen - 2) .. ")")
+      if big then
+         memory[addr + 1] = bit32.band(data, 0xff)
+         memory[addr] = bit32.band(bit32.rshift(data, 8), 0xff)
+      else
+         memory[addr] = bit32.band(data, 0xff)
+         memory[addr + 1] = bit32.band(bit32.rshift(data, 8), 0xff)
+      end
+   end
+   local function readu32(memory, addr, big)
+      addr = tonumber(ffi.cast("uint32_t", bit32.band(addr, 0xffffffff)))
+      assert(addr >= 0 and addr <= buflen - 4, "Address out of bounds. (not " .. string.format("%08x <= %08x <= %08x", 0, addr, buflen - 4) .. ")")
+      local a, b, c, d = memory[addr], memory[addr + 1], memory[addr + 2], memory[addr + 3]
+      if big then
+         a, b, c, d = d, c, b, a
+      end
+      return bit32.bor(bit32.lshift(d or 0, 24), bit32.lshift(c or 0, 16), bit32.lshift(b or 0, 8), a or 0)
+   end
+   local function writeu32(memory, addr, data, big)
+      addr = tonumber(ffi.cast("uint32_t", bit32.band(addr, 0xffffffff)))
+      assert(addr >= 0 and addr <= buflen - 4, "Address out of bounds. (not " .. string.format("%08x <= %08x <= %08x", 0, addr, buflen - 4) .. ")")
+      if big then
+         memory[addr + 3] = bit32.band(data, 0xff)
+         memory[addr + 2] = bit32.band(bit32.rshift(data, 8), 0xff)
+         memory[addr + 1] = bit32.band(bit32.rshift(data, 16), 0xff)
+         memory[addr] = bit32.rshift(data, 24)
+      else
+         memory[addr] = bit32.band(data, 0xff)
+         memory[addr + 1] = bit32.band(bit32.rshift(data, 8), 0xff)
+         memory[addr + 2] = bit32.band(bit32.rshift(data, 16), 0xff)
+         memory[addr + 3] = bit32.rshift(data, 24)
+      end
+   end
+   local function writeqword(memory, addr, a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p)
+      addr = tonumber(ffi.cast("uint32_t", bit32.band(addr, 0xffffffff)))
+      assert(addr >= 0 and addr <= buflen - 16, "Address out of bounds. (not " .. string.format("%08x <= %08x <= %08x", 0, addr, buflen - 16) .. ")")
+      memory[addr], memory[addr + 1], memory[addr + 2], memory[addr + 3], memory[addr + 4], memory[addr + 5], memory[addr + 6], memory[addr + 7], memory[addr + 8], memory[addr + 9], memory[addr + 10], memory[addr + 11], memory[addr + 12], memory[addr + 13], memory[addr + 14], memory[addr + 15] =
+         ffi.cast("uint8_t", a),
+         ffi.cast("uint8_t", b),
+         ffi.cast("uint8_t", c),
+         ffi.cast("uint8_t", d),
+         ffi.cast("uint8_t", e),
+         ffi.cast("uint8_t", f),
+         ffi.cast("uint8_t", g),
+         ffi.cast("uint8_t", h),
+         ffi.cast("uint8_t", i),
+         ffi.cast("uint8_t", j),
+         ffi.cast("uint8_t", k),
+         ffi.cast("uint8_t", l),
+         ffi.cast("uint8_t", m),
+         ffi.cast("uint8_t", n),
+         ffi.cast("uint8_t", o),
+         ffi.cast("uint8_t", p)
+   end
+   rv.set_memory_functions({
+      relocate(readu8, rv.io.readu8()),
+      relocate(readu16, rv.io.readu16()),
+      relocate(readu32, rv.io.readu32()),
+   }, {
+      relocate(writeu8, rv.io.writeu8()),
+      relocate(writeu16, rv.io.writeu16()),
+      relocate(writeu32, rv.io.writeu32()),
+      relocate(writeqword, writeqword2),
+   })
+end
 local elf_file = assert(io.open(args.input, "rb"), "failed to open file")
-local core, elf = rv.create_core(args.harts, elf_file)
+local core, elf = rv.create_core(args.harts, elf_file, memory)
 local sig_begin, sig_size, fromhost, tohost
 if args.signature then
    local sig_end

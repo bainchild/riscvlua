@@ -593,13 +593,17 @@ function state_utils:real2virt(addr)
    if extract(self.csr[CSR.satp], 31) == 0 then
       return addr
    end
-   error("TODO")
+   --TODO
+   self.exit = true
+   return 0
 end
 function state_utils:virt2real(addr)
    if extract(self.csr[CSR.satp], 31) == 0 then
       return addr
    end
-   error("TODO")
+   --TODO
+   self.exit = true
+   return 0
 end
 ---@diagnostic disable-next-line: unused
 function state_utils:access_check(from, to, perm)
@@ -616,7 +620,7 @@ local opamp = {}
 opamp[0] = function(state, funct3, rs1, imm11, rd) -- LOAD I
    rs1 = rs1 ~= 0 and state.reg[rs1] or 0
    if rd == 0 then
-      return
+      return false, true
    end -- TODO: should this exit early, for exception reasons?
    ---@diagnostic disable-next-line: param-type-mismatch
    local base = bit.band(rs1 + twos(extend(imm11, 12, 32), 31), 0xffffffff)
@@ -850,11 +854,15 @@ if jit then
             if rd ~= 0 then
                ---@diagnostic disable-next-line: param-type-mismatch
                state.reg[rd] = bit.band(rs1 + rs2, 0xffffffff)
+            else
+               return false, true
             end
          elseif funct7 == 32 then -- sub
             if rd ~= 0 then
                ---@diagnostic disable-next-line: param-type-mismatch
                state.reg[rd] = bit.band(rs1 - rs2, 0xffffffff)
+            else
+               return false, true
             end
          else
             return state:assert(false, MCAUSE.illegal_instruction)
@@ -866,6 +874,8 @@ if jit then
          local shift = extract(rs2, 0, 5)
          if rd ~= 0 then
             state.reg[rd] = bit.band(bit.lshift(rs1, shift), 0xffffffff)
+         else
+            return false, true
          end
       elseif funct3 == 2 then -- slt
          if not state:assert(funct7 == 0, MCAUSE.illegal_instruction) then
@@ -873,6 +883,8 @@ if jit then
          end
          if rd ~= 0 then
             state.reg[rd] = rs1 < rs2 and 1 or 0
+         else
+            return false, true
          end
       elseif funct3 == 3 then -- sltu
          if not state:assert(funct7 == 0, MCAUSE.illegal_instruction) then
@@ -886,6 +898,8 @@ if jit then
                lt = rs1 < rs2
             end
             state.reg[rd] = lt and 1 or 0
+         else
+            return false, true
          end
       elseif funct3 == 4 then -- xor
          if not state:assert(funct7 == 0, MCAUSE.illegal_instruction) then
@@ -893,16 +907,22 @@ if jit then
          end
          if rd ~= 0 then
             state.reg[rd] = bit.bxor(rs1, rs2)
+         else
+            return false, true
          end
       elseif funct3 == 5 then
          local shift = extract(rs2, 0, 5)
          if funct7 == 0 then -- srl
             if rd ~= 0 then
                state.reg[rd] = bit.rshift(rs1, shift)
+            else
+               return false, true
             end
          elseif funct7 == 32 then -- sra
             if rd ~= 0 then
                state.reg[rd] = bit.arshift(rs1, shift)
+            else
+               return false, true
             end
          else
             return state:assert(false, MCAUSE.illegal_instruction)
@@ -913,6 +933,8 @@ if jit then
          end
          if rd ~= 0 then
             state.reg[rd] = bit.bor(rs1, rs2)
+         else
+            return false, true
          end
       elseif funct3 == 7 then -- and
          if not state:assert(funct7 == 0, MCAUSE.illegal_instruction) then
@@ -920,6 +942,8 @@ if jit then
          end
          if rd ~= 0 then
             state.reg[rd] = bit.band(rs1, rs2)
+         else
+            return false, true
          end
       else
          return state:assert(false, MCAUSE.illegal_instruction)
@@ -936,11 +960,15 @@ else
             if rd ~= 0 then
                ---@diagnostic disable-next-line: param-type-mismatch
                state.reg[rd] = bit.band(rs1 + rs2, 0xffffffff)
+            else
+               return false, true
             end
          elseif funct7 == 32 then -- sub
             if rd ~= 0 then
                ---@diagnostic disable-next-line: param-type-mismatch
                state.reg[rd] = bit.band(rs1 - rs2, 0xffffffff)
+            else
+               return false, true
             end
          else
             return state:assert(false, MCAUSE.illegal_instruction)
@@ -952,6 +980,8 @@ else
          local shift = extract(rs2, 0, 5)
          if rd ~= 0 then
             state.reg[rd] = bit.band(bit.lshift(rs1, shift), 0xffffffff)
+         else
+            return false, true
          end
       elseif funct3 == 2 then -- slt
          if not state:assert(funct7 == 0, MCAUSE.illegal_instruction) then
@@ -960,6 +990,8 @@ else
          rs1, rs2 = twos(rs1, 31), twos(rs2, 31)
          if rd ~= 0 then
             state.reg[rd] = rs1 < rs2 and 1 or 0
+         else
+            return false, true
          end
       elseif funct3 == 3 then -- sltu
          if not state:assert(funct7 == 0, MCAUSE.illegal_instruction) then
@@ -967,6 +999,8 @@ else
          end
          if rd ~= 0 then
             state.reg[rd] = rs1 < rs2 and 1 or 0
+         else
+            return false, true
          end
       elseif funct3 == 4 then -- xor
          if not state:assert(funct7 == 0, MCAUSE.illegal_instruction) then
@@ -974,16 +1008,22 @@ else
          end
          if rd ~= 0 then
             state.reg[rd] = bit.bxor(rs1, rs2)
+         else
+            return false, true
          end
       elseif funct3 == 5 then
          local shift = extract(rs2, 0, 5)
          if funct7 == 0 then -- srl
             if rd ~= 0 then
                state.reg[rd] = bit.rshift(rs1, shift)
+            else
+               return false, true
             end
          elseif funct7 == 32 then -- sra
             if rd ~= 0 then
                state.reg[rd] = bit.arshift(rs1, shift)
+            else
+               return false, true
             end
          else
             return state:assert(false, MCAUSE.illegal_instruction)
@@ -994,6 +1034,8 @@ else
          end
          if rd ~= 0 then
             state.reg[rd] = bit.bor(rs1, rs2)
+         else
+            return false, true
          end
       elseif funct3 == 7 then -- and
          if not state:assert(funct7 == 0, MCAUSE.illegal_instruction) then
@@ -1001,6 +1043,8 @@ else
          end
          if rd ~= 0 then
             state.reg[rd] = bit.band(rs1, rs2)
+         else
+            return false, true
          end
       else
          return state:assert(false, MCAUSE.illegal_instruction)
@@ -1010,10 +1054,9 @@ end
 if not can_M then
    print("M extension not provided due to lack of 64 bit integers")
 end
--- needs to be fixed(?)
 opamp[13] = function(state, rd, imm20) -- LUI U
    if rd == 0 then
-      return
+      return false, true
    end
    if state.csr[CSR.mhartid] == 0 and dump then
       print(("LUI imm20 %08x"):format(imm20))
@@ -1376,6 +1419,9 @@ opamp[28] = function(state, funct3, rs1, imm11, rd) -- SYSTEM I
          if not state:access_csr(imm11, true, val ~= 0, val) then
             return
          end
+         if rd == 0 and val == 0 then
+            return false, true
+         end
          if rd ~= 0 then
             state.reg[rd] = state.csr[imm11] or 0
          end
@@ -1385,6 +1431,9 @@ opamp[28] = function(state, funct3, rs1, imm11, rd) -- SYSTEM I
       elseif funct3 == 3 or funct3 == 7 then -- csrrc[i]
          if not state:access_csr(imm11, true, val ~= 0, val) then
             return
+         end
+         if rd == 0 and val == 0 then
+            return false, true
          end
          if rd ~= 0 then
             state.reg[rd] = state.csr[imm11] or 0
@@ -1599,11 +1648,11 @@ local function load_elf(memory, file)
             if siz % 16 == 0 then
                for dc = 1, siz, 16 do
                   ---@diagnostic disable-next-line: missing-parameter
-                  writeqword(memory, (v.Address or v.PhysicalAddress) + dc - 1, data:byte(dc, dc + 15))
+                  pcall(writeqword, memory, (v.Address or v.PhysicalAddress) + dc - 1, data:byte(dc, dc + 15))
                end
             else
                for dc = 1, siz do
-                  writeu8(memory, (v.Address or v.PhysicalAddress) + dc - 1, data:byte(dc))
+                  pcall(writeu8, memory, (v.Address or v.PhysicalAddress) + dc - 1, data:byte(dc))
                end
             end
             ---@diagnostic disable-next-line: assign-type-mismatch
@@ -1872,6 +1921,7 @@ local function run_hart(state, silent)
                if dump then
                   print(string.format("[%d] %08x: c.misc-alu (unimplemented)", state.csr[CSR.mhartid] or -1, state.reg.pc))
                end
+               state:assert(false, MCAUSE.illegal_instruction)
             elseif funct3 == 5 then
                -- c.j
                -- offset[11|4|9:8|10|6|7|3:1|5], the monstrosity
@@ -2007,7 +2057,7 @@ local function run_hart(state, silent)
                      if dump then
                         print(string.format("[%d] %08x: c.jr x%d", state.csr[CSR.mhartid] or 0, state.reg.pc, rs1))
                      end
-                     state.reg.pc = state.reg[rs1] - 2 or 0
+                     state.reg.pc = state.reg[rs1] - len + 1
                   else
                      -- c.mv
                      if dump then
@@ -2239,7 +2289,7 @@ end
 ---@generic M
 ---@param harts integer?
 ---@param elf file?
----@param mem M
+---@param mem M?
 ---@return RV_Core, ELF?
 local function new_core(harts, elf, mem)
    ---@class RV_Core
